@@ -1,173 +1,261 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
-import scipy.stats
+from scipy.stats import multivariate_normal
+import math
+import random
+import copy
 
-# === 設定 ===
-DT = 0.1             # 時間刻み [s]
-SIM_STEPS = 200      # シミュレーションのステップ数
-PARTICLE_NUM = 100   # パーティクルの数
-NOISE_VEL = 0.8    # 速度に対するノイズ分散 (大きいと前後にブレる)
-NOISE_OMG = 0.2    # 角速度に対するノイズ分散 (大きいと進行方向がブレる)
-NOISE_SENSOR = 0.2 # 距離計測の誤差標準偏差 (大きいとパーティクルが収束しにくい)
+# ==========================================
+# 1. 基本関数・クラス
+# ==========================================
 
-# ランドマークの位置 (x, y)
-LANDMARKS = [np.array([5.0, 0.0]), 
-             np.array([-8.0, 10.0]), 
-             np.array([-5.0, -5.0])]
+def state_transition(nu, omega, time, pose):
+    t0 = pose[2]
+    if math.fabs(omega) < 1e-10: 
+        return pose + np.array( [nu*math.cos(t0), 
+                                 nu*math.sin(t0), 
+                                 omega ] ) * time
+    else:
+        return pose + np.array( [nu/omega*(math.sin(t0 + omega*time) - math.sin(t0)), 
+                                 nu/omega*(-math.cos(t0 + omega*time) + math.cos(t0)), 
+                                 omega*time ] )
 
-class Particle:
-    """ロボットの状態（x, y, theta）と重みを持つパーティクル"""
-    def __init__(self, x, y, theta, weight):
-        self.x = x
-        self.y = y
-        self.theta = theta
+def observation_function(pose, landmark_pos):
+    diff = landmark_pos - pose[0:2]
+    phi = math.atan2(diff[1], diff[0]) - pose[2]
+    while phi >= np.pi: phi -= 2*np.pi
+    while phi < -np.pi: phi += 2*np.pi
+    return np.array( [math.hypot(*diff), phi ] )
+
+class Landmark:
+    def __init__(self, x, y, lid):
+        self.pos = np.array([x, y])
+        self.id = lid
+
+class Map:
+    def __init__(self):
+        self.landmarks = []
+    
+    def append_landmark(self, x, y):
+        self.landmarks.append(Landmark(x, y, len(self.landmarks)))
+
+# ==========================================
+# 2. MCL クラス群 (★ここを修正済み)
+# ==========================================
+
+class Particle: 
+    def __init__(self, init_pose, weight):
+        self.pose = init_pose
         self.weight = weight
-
-class Robot:
-    """真のロボット（シミュレータ）"""
-    def __init__(self):
-        self.x = 3.0
-        self.y = 0.0
-        self.theta = 0.0
-    
-    def move(self, v, omega):
-        # 実際の移動（ノイズなしとするが、環境によってはノイズを入れる）
-        self.theta += omega * DT
-        self.x += v * np.cos(self.theta) * DT
-        self.y += v * np.sin(self.theta) * DT
         
-    def observe(self):
-        # ランドマークまでの距離を観測（+観測ノイズ）
-        z_list = []
-        for lm in LANDMARKS:
-            d = np.sqrt((self.x - lm[0])**2 + (self.y - lm[1])**2)
-            # 観測ノイズを加える
-            # d += np.random.normal(0.0, 0.5)
-            d += np.random.normal(0.0, NOISE_SENSOR)
-            z_list.append(d)
-        return z_list
-
-class MCL:
-    """MCLアルゴリズム"""
-    def __init__(self):
-        # 初期位置 (0,0,0) 付近にばら撒く
-        self.particles = []
-        for i in range(PARTICLE_NUM):
-            p = Particle(np.random.normal(0.0, 0.5),
-                         np.random.normal(0.0, 0.5),
-                         np.random.normal(0.0, 0.1),
-                         1.0/PARTICLE_NUM)
-            self.particles.append(p)
-            
-    def motion_update(self, v, omega):
-        # 動作モデル：全パーティクルを移動（ノイズ混入）
-        for p in self.particles:
-            # 速度・角速度にノイズが入る
-            # v_noise = v + np.random.normal(0.0, 0.2)
-            v_noise = v + np.random.normal(0.0, NOISE_VEL)
-            omega_noise = omega + np.random.normal(0.0, NOISE_OMG) # 角度はブレやすい
-            # omega_noise = omega + np.random.normal(0.0, 0.1)
-
-            p.theta += omega_noise * DT
-            p.x += v_noise * np.cos(p.theta) * DT
-            p.y += v_noise * np.sin(p.theta) * DT
-
-    def observation_update(self, observations):
-        # 観測モデル：尤度計算
-        for p in self.particles:
-            likelihood = 1.0
-            for i, lm in enumerate(LANDMARKS):
-                # パーティクルから見たランドマーク距離
-                d_pred = np.sqrt((p.x - lm[0])**2 + (p.y - lm[1])**2)
-                # 観測値(observations[i])との差で重み付け
-                # 距離が近いほど確率密度が高い
-                pdf = scipy.stats.norm.pdf(observations[i], loc=d_pred, scale=1.0)
-                likelihood *= pdf
-            p.weight *= likelihood
-            
-        # 重みの正規化
-        total_weight = sum([p.weight for p in self.particles])
-        if total_weight > 0:
-            for p in self.particles:
-                p.weight /= total_weight
-                
-    def resampling(self):
-        # シンプルな系統サンプリング
-        weights = [p.weight for p in self.particles]
-        # 重みに応じてインデックスを抽選
-        indices = np.random.choice(range(PARTICLE_NUM), size=PARTICLE_NUM, p=weights, replace=True)
+    def motion_update(self, nu, omega, time, noise_rate_pdf): 
+        ns = noise_rate_pdf.rvs()
+        pnu = nu + ns[0]*math.sqrt(abs(nu)/time) + ns[1]*math.sqrt(abs(omega)/time)
+        pomega = omega + ns[2]*math.sqrt(abs(nu)/time) + ns[3]*math.sqrt(abs(omega)/time)
+        self.pose = state_transition(pnu, pomega, time, self.pose)
         
-        new_particles = []
-        for i in indices:
-            old_p = self.particles[i]
-            # コピーを作成（重みはリセット）
-            new_p = Particle(old_p.x, old_p.y, old_p.theta, 1.0/PARTICLE_NUM)
-            new_particles.append(new_p)
-        self.particles = new_particles
+    def observation_update(self, observation, envmap, distance_dev_rate, direction_dev):
+        for d in observation:
+            obs_dist = d[0]
+            obs_phi = d[1]
+            obs_id = d[2]
+            
+            pos_on_map = envmap.landmarks[obs_id].pos
+            particle_suggest_pos = observation_function(self.pose, pos_on_map)
+            
+            distance_dev = distance_dev_rate * particle_suggest_pos[0]
+            cov = np.diag(np.array([distance_dev**2, direction_dev**2]))
+            
+            try:
+                p = multivariate_normal(mean=particle_suggest_pos, cov=cov).pdf([obs_dist, obs_phi])
+                self.weight *= p
+            except:
+                pass
 
-# === アニメーション実行部分 ===
-fig, ax = plt.subplots(figsize=(8, 8))
-robot = Robot()
-mcl = MCL()
+class Mcl:
+    def __init__(self, envmap, init_pose, num, motion_noise_stds, distance_dev_rate, direction_dev):
+        self.particles = [Particle(init_pose, 1.0/num) for i in range(num)]
+        self.map = envmap
+        self.distance_dev_rate = distance_dev_rate
+        self.direction_dev = direction_dev
 
-# 描画用オブジェクトの初期化
-particle_scat = ax.scatter([], [], s=10, color='blue', alpha=0.5, label='Particles')
-robot_scat, = ax.plot([], [], 'r-', linewidth=2, label='Robot Trajectory')
-true_pos_scat, = ax.plot([], [], 'ro', label='Current Robot')
-time_text = ax.text(0.02, 0.95, '', transform=ax.transAxes)
+        v = motion_noise_stds
+        c = np.diag([v["nn"]**2, v["no"]**2, v["on"]**2, v["oo"]**2])
+        self.motion_noise_rate_pdf = multivariate_normal(cov=c)
+        
+        self.pose = self.particles[0].pose 
+        
+    def set_ml(self):
+        # ★ここを修正: 最尤(argmax)ではなく、重み付き平均(mean)を使う
+        xs = np.array([p.pose[0] for p in self.particles])
+        ys = np.array([p.pose[1] for p in self.particles])
+        ts = np.array([p.pose[2] for p in self.particles])
+        ws = np.array([p.weight for p in self.particles])
+        
+        # 重みの合計で割って正規化（念のため）
+        if np.sum(ws) != 0:
+            ws = ws / np.sum(ws)
+        
+        # 座標の平均
+        x_mean = np.sum(xs * ws)
+        y_mean = np.sum(ys * ws)
+        
+        # 角度の平均（ベクトル合成）
+        v_cos = np.sum(np.cos(ts) * ws)
+        v_sin = np.sum(np.sin(ts) * ws)
+        t_mean = math.atan2(v_sin, v_cos)
+        
+        self.pose = np.array([x_mean, y_mean, t_mean])
+        
+    def motion_update(self, nu, omega, time): 
+        for p in self.particles: 
+            p.motion_update(nu, omega, time, self.motion_noise_rate_pdf)
+            
+    def observation_update(self, observation): 
+        for p in self.particles:
+            p.observation_update(observation, self.map, self.distance_dev_rate, self.direction_dev) 
+        self.set_ml() 
+        self.resampling() 
+            
+    def resampling(self): 
+        ws = np.cumsum([e.weight for e in self.particles])
+        if ws[-1] < 1e-100: ws = [e + 1e-100 for e in ws]
+            
+        step = ws[-1]/len(self.particles)
+        r = np.random.uniform(0.0, step)
+        cur_pos = 0
+        ps = []
+        
+        while(len(ps) < len(self.particles)):
+            if r < ws[cur_pos]:
+                ps.append(self.particles[cur_pos])
+                r += step
+            else:
+                cur_pos += 1
 
-# 軌跡保存用
-robot_history_x = []
-robot_history_y = []
+        self.particles = [copy.deepcopy(e) for e in ps]
+        for p in self.particles: p.weight = 1.0/len(self.particles)
 
-def init():
-    # 背景のランドマーク描画
-    lx = [lm[0] for lm in LANDMARKS]
-    ly = [lm[1] for lm in LANDMARKS]
-    ax.scatter(lx, ly, marker='*', s=200, color='orange', label='Landmarks')
-    
-    ax.set_xlim(-15, 15)
-    ax.set_ylim(-15, 15)
-    ax.grid(True)
-    ax.legend()
-    return particle_scat, robot_scat, true_pos_scat, time_text
+# ==========================================
+# 3. エージェント & ロボット
+# ==========================================
 
-def update(frame):
-    # 1. ロボットが動く (直進1.0, 回転一定 で円を描く)
-    v = 2.0
-    omega = 0.4
-    robot.move(v, omega)
-    
-    # 履歴保存
-    robot_history_x.append(robot.x)
-    robot_history_y.append(robot.y)
-    
-    # 2. ロボットが観測
-    obs = robot.observe()
-    
-    # 3. MCL更新サイクル
-    mcl.motion_update(v, omega)  # 予測
-    mcl.observation_update(obs)  # 更新
-    mcl.resampling()             # リサンプリング
-    
-    # 4. 描画更新
-    # パーティクル
-    px = [p.x for p in mcl.particles]
-    py = [p.y for p in mcl.particles]
-    particle_scat.set_offsets(np.c_[px, py])
-    
-    # ロボット軌跡
-    robot_scat.set_data(robot_history_x, robot_history_y)
-    true_pos_scat.set_data([robot.x], [robot.y])
-    
-    time_text.set_text(f'Step: {frame}')
-    
-    return particle_scat, robot_scat, true_pos_scat, time_text
+class EstimationAgent: 
+    def __init__(self, time_interval, nu, omega, estimator):
+        self.estimator = estimator
+        self.time_interval = time_interval
+        self.nu = nu
+        self.omega = omega
+        self.prev_nu = 0.0
+        self.prev_omega = 0.0
+        self.poses = []
+        
+    def decision(self, observation=None): 
+        self.estimator.motion_update(self.prev_nu, self.prev_omega, self.time_interval)
+        self.prev_nu, self.prev_omega = self.nu, self.omega
+        self.estimator.observation_update(observation)
+        self.poses.append(self.estimator.pose)
+        return self.nu, self.omega
 
-# アニメーション作成
-ani = animation.FuncAnimation(fig, update, frames=SIM_STEPS,
-                              init_func=init, interval=100, blit=True)
+class RealRobot:
+    def __init__(self, init_pose, agent, envmap):
+        self.pose = init_pose
+        self.agent = agent
+        self.map = envmap
+        
+    def one_step(self, time_interval):
+        obs = []
+        for lm in self.map.landmarks:
+            z = observation_function(self.pose, lm.pos)
+            z[0] += np.random.normal(0.0, 0.1)
+            z[1] += np.random.normal(0.0, 0.05)
+            if z[0] < 10.0:
+                obs.append([z[0], z[1], lm.id])
+        
+        nu, omega = self.agent.decision(obs)
+        self.pose = state_transition(nu, omega, time_interval, self.pose)
 
-plt.title("2D MCL Animation (Inspired by LNPR)")
-plt.show()
+# ==========================================
+# 4. メイン実行 & アニメーション
+# ==========================================
+
+def main():
+    TIME_INTERVAL = 0.1
+    SIM_STEPS = 300
+    
+    m = Map()
+    # for ln in [(-4,2), (2,-3), (3,3), (0, 5), (-2, -4)]: 
+    for ln in [(-4,2),  (3,3)]: 
+        m.append_landmark(*ln)
+
+    initial_pose = np.array([0.0, 0.0, 0.0])
+
+    motion_noise = {"nn":0.5, "no":0.5, "on":0.5, "oo":0.5}
+    # motion_noise = {"nn":0.19, "no":0.001, "on":0.13, "oo":0.2}
+    # パーティクル数100
+    estimator = Mcl(m, np.array([0.0, 0.0, 0.0]), 100, motion_noise, distance_dev_rate=0.2, direction_dev=0.05)
+    
+    agent = EstimationAgent(TIME_INTERVAL, 0.4, 20.0/180*math.pi, estimator)
+    robot = RealRobot(initial_pose, agent, m)
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    
+    initial_xs = [p.pose[0] for p in estimator.particles]
+    initial_ys = [p.pose[1] for p in estimator.particles]
+    initial_us = [math.cos(p.pose[2]) for p in estimator.particles]
+    initial_vs = [math.sin(p.pose[2]) for p in estimator.particles]
+
+    # パーティクルを少し見やすく (scale=5.0)
+    p_arrows = ax.quiver(initial_xs, initial_ys, initial_us, initial_vs, 
+                         color='blue', alpha=0.5, scale=5.0, 
+                         scale_units='xy', angles='xy', label='Particles')
+    
+    r_body, = ax.plot([], [], 'ro', markersize=10, label='Robot')
+    r_dir, = ax.plot([], [], 'r-', linewidth=2)
+    traj_line, = ax.plot([], [], 'r-', linewidth=1, alpha=0.5, label='Est Trajectory')
+    time_text = ax.text(0.05, 0.9, '', transform=ax.transAxes)
+
+    def init():
+        ax.set_aspect('equal')
+        ax.set_xlim(-6, 6)
+        ax.set_ylim(-6, 6)
+        ax.grid(True)
+        
+        lx = [lm.pos[0] for lm in m.landmarks]
+        ly = [lm.pos[1] for lm in m.landmarks]
+        ax.scatter(lx, ly, s=200, marker='*', color='orange', zorder=10, label='Landmarks')
+        ax.legend()
+        return r_body, r_dir, p_arrows, traj_line, time_text
+
+    def update(frame):
+        robot.one_step(TIME_INTERVAL)
+        
+        rx, ry, rt = robot.pose
+        r_body.set_data([rx], [ry])
+        r_dir.set_data([rx, rx + 0.5*math.cos(rt)], [ry, ry + 0.5*math.sin(rt)])
+        
+        px = [p.pose[0] for p in estimator.particles]
+        py = [p.pose[1] for p in estimator.particles]
+        p_len = [p.weight * len(estimator.particles) for p in estimator.particles]
+        pu = [l * math.cos(p.pose[2]) for p, l in zip(estimator.particles, p_len)]
+        pv = [l * math.sin(p.pose[2]) for p, l in zip(estimator.particles, p_len)]
+        
+        p_arrows.set_offsets(np.c_[px, py])
+        p_arrows.set_UVC(pu, pv)
+        
+        # 推定軌跡の更新
+        hist = agent.poses
+        hx = [h[0] for h in hist]
+        hy = [h[1] for h in hist]
+        traj_line.set_data(hx, hy)
+        
+        time_text.set_text(f"Step: {frame}")
+        
+        return r_body, r_dir, p_arrows, traj_line, time_text
+
+    ani = animation.FuncAnimation(fig, update, frames=SIM_STEPS, init_func=init, interval=100, blit=False)
+    plt.show()
+
+if __name__ == "__main__":
+    main()
