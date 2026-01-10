@@ -8,24 +8,19 @@
 
 2次元平面上を移動するロボットのモンテカルロ自己位置推定（MCL: Monte Carlo Localization）のシミュレーションスクリプト([mcl_2d.py](https://github.com/ryotaema/MCL_for_class/blob/main/mcl_2d.py))です． 
 
-「詳解 確率ロボティクス」で扱われるパーティクルフィルタの概念をベースに，アニメーションによる可視化と軌跡描画機能を実装しています．
-
 ## 実行例
+[mcl_2d.py](https://github.com/ryotaema/MCL_for_class/blob/main/mcl_2d.py)
+上記スクリプトを実行すると以下のような画面が現れ，ロボットが円周軌道上を移動します．ロボットは移動時にスリップとセンサのノイズを含むような設定になっています．
+ランドマーク付近を通貨した際に進行方向に伸びていたパーティクルが集合していることを確認できます．赤い線はMCLによって推定された軌跡であり，赤丸で示すロボットの軌道と概ね一致していることがわかる．
+
 <img src="mcl_demo.gif">
 
-上記のアニメーションでは、過酷なノイズ設定（分散係数 `0.5`）におけるMCLの挙動を確認できます。
 
-* **拡散 (Diffusion):**
-    ランドマークが観測できない間、移動ノイズの影響でパーティクル（青矢印）が大きく拡散し、自己位置の不確かさが増大します。
-* **収束 (Convergence):**
-    ランドマーク（星）を観測した瞬間、尤度計算とリサンプリングにより、パーティクルが真のロボット位置（赤点）付近へ急速に収束します。
-* **軌跡の補正:**
-    一時的に推定位置を見失っても、観測によって正しい軌跡（赤線）へと復帰・補正される様子が確認できます。
 
 ## MCL（Monte Carlo Localization）とは
 
-MCLは，パーティクルフィルタに基づく確率的な自己位置推定アルゴリズムです．
-多数の「パーティクル」（仮説）を用いて，ロボットの位置の確率分布を表現し，センサー観測に基づいて位置を推定します．
+MCLは，パーティクルフィルタに基づく自己位置推定アルゴリズムです．
+多数の「パーティクル」を用いて，ロボットの位置の確率分布を表現し，センサー観測に基づいて位置を推定します．
 
 ## 動作環境
 
@@ -69,10 +64,13 @@ python mcl_2d.py
 
 ### 環境
 - **ランドマーク**: 3箇所
+    * (-2,2) 
+    * (3,3) 
+    * (-2,-1)
 - **ロボットの動作**: 円形軌道
 - **センサノイズ設定 (Sensor Noise):**
-        * **距離計測:** 計測距離の $20\%$の誤差 (`distance_dev_rate=0.2`)
-        * **方位計測:** $0.05$ [rad] の誤差 (`direction_dev=0.05`)
+    * **距離計測:** 計測距離の $20\%$の誤差 (`distance_dev_rate=0.2`)
+    * **方位計測:** $0.05$ [rad] の誤差 (`direction_dev=0.05`)
 
 ### パラメータ
 - **パーティクル数**: 100個
@@ -84,6 +82,43 @@ python mcl_2d.py
         * `no`: 直進時の回転方向のばらつき
         * `on`: 回転時の直進方向のばらつき
         * `oo`: 回転時の回転方向のばらつき
+
+## アルゴリズム
+
+本シミュレータでは、以下の数理モデルに基づいてロボットの状態遷移と観測更新を行っています。
+
+### 1. 状態遷移モデル (Motion Model)
+ロボットの状態を $\mathbf{x}_t = (x_t, y_t, \theta_t)^T$、制御入力を $\mathbf{u}_t = (v_t, \omega_t)^T$（並進速度、角速度）とします。
+時間刻み $\Delta t$ における状態遷移は、以下のオドメトリ動作モデル（速度運動モデル）に従います。
+
+$$
+\begin{pmatrix} x_t \\ y_t \\ \theta_t \end{pmatrix} = \begin{pmatrix} x_{t-1} \\ y_{t-1} \\ \theta_{t-1} \end{pmatrix} + \begin{pmatrix} \frac{\hat{v}_t}{\hat{\omega}_t} (\sin(\theta_{t-1} + \hat{\omega}_t \Delta t) - \sin\theta_{t-1}) \\ \frac{\hat{v}_t}{\hat{\omega}_t} (-\cos(\theta_{t-1} + \hat{\omega}_t \Delta t) + \cos\theta_{t-1}) \\ \hat{\omega}_t \Delta t \end{pmatrix}
+$$
+
+ここで、シミュレーション上の不確実性を再現するため、実際の制御入力にはガウス分布に従うノイズ $\varepsilon$ が混入された値 $(\hat{v}_t, \hat{\omega}_t)$ が使用されます。
+
+$$
+\begin{aligned}
+\hat{v}_t &= v_t + \varepsilon_{v} \\
+\hat{\omega}_t &= \omega_t + \varepsilon_{\omega}
+\end{aligned}
+$$
+
+### 2. 観測モデル (Measurement Model)
+地図上のランドマーク $m_j$ の位置を $(m_{j,x}, m_{j,y})$ としたとき、ロボットから見たランドマークの距離 $r$ と方位角 $\phi$ は以下のように計算されます。
+
+$$
+\mathbf{z}_{pred} = \begin{pmatrix} r \\ \phi \end{pmatrix} = \begin{pmatrix} \sqrt{(m_{j,x} - x_t)^2 + (m_{j,y} - y_t)^2} \\ \text{atan2}(m_{j,y} - y_t, m_{j,x} - x_t) - \theta_t \end{pmatrix}
+$$
+
+### 3. 尤度計算 (Likelihood Update)
+実際のセンサ観測値 $\mathbf{z}_{obs}$ と、各パーティクルの位置から予測される観測値 $\mathbf{z}_{pred}$ との差（誤差）に基づき、そのパーティクルの尤度（重み $w$）を算出します。誤差分布には多変量ガウス分布を仮定しています。
+
+$$
+w \propto \mathcal{N}(\mathbf{z}_{obs} \mid \mathbf{z}_{pred}, \Sigma)
+$$
+
+ここで $\Sigma$ はセンサのノイズ共分散行列であり、距離に比例して誤差が大きくなる特性をモデル化しています。
 
 ## 参考
 上田隆一『詳解 確率ロボティクス -Pythonによる基礎アルゴリズムの実装-』講談社, 2019年.
