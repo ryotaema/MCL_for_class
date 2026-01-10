@@ -76,7 +76,7 @@ python mcl_2d.py
 - **パーティクル数**: 100個
 - **ステップ数**: 300
 - **動作ノイズ設定 (Motion Noise):**
-    * 移動に伴う不確実性を再現するため，以下の分散係数を設定しています．（値が大きいほど移動ごとの拡散が激しくなります）。
+    * 移動に伴う不確実性を再現するため，以下の分散係数を設定しています．（値が大きいほど移動ごとの拡散が激しくなります）．
     * 設定値: `{"nn":0.5, "no":0.5, "on":0.5, "oo":0.5}`
         * `nn`: 直進時の直進方向のばらつき
         * `no`: 直進時の回転方向のばらつき
@@ -85,17 +85,17 @@ python mcl_2d.py
 
 ## アルゴリズム
 
-本シミュレータでは、以下の数理モデルに基づいてロボットの状態遷移と観測更新を行っています。
+本シミュレータでは，以下の数理モデルに基づいてロボットの状態遷移と観測更新を行っています。
 
 ### 1. 状態遷移モデル (Motion Model)
-ロボットの状態を $\mathbf{x}_t = (x_t, y_t, \theta_t)^T$、制御入力を $\mathbf{u}_t = (v_t, \omega_t)^T$（並進速度、角速度）とします。
-時間刻み $\Delta t$ における状態遷移は、以下のオドメトリ動作モデル（速度運動モデル）に従います。
+ロボットの状態を $\mathbf{x}_t = (x_t, y_t, \theta_t)^T$，制御入力を $\mathbf{u}_t = (v_t, \omega_t)^T$（並進速度、角速度）とします．
+時間刻み $\Delta t$ における状態遷移は，以下のオドメトリ動作モデル（速度運動モデル）に従います．
 
 $$
 \begin{pmatrix} x_t \\ y_t \\ \theta_t \end{pmatrix} = \begin{pmatrix} x_{t-1} \\ y_{t-1} \\ \theta_{t-1} \end{pmatrix} + \begin{pmatrix} \frac{\hat{v}_t}{\hat{\omega}_t} (\sin(\theta_{t-1} + \hat{\omega}_t \Delta t) - \sin\theta_{t-1}) \\ \frac{\hat{v}_t}{\hat{\omega}_t} (-\cos(\theta_{t-1} + \hat{\omega}_t \Delta t) + \cos\theta_{t-1}) \\ \hat{\omega}_t \Delta t \end{pmatrix}
 $$
 
-ここで、シミュレーション上の不確実性を再現するため、実際の制御入力にはガウス分布に従うノイズ $\varepsilon$ が混入された値 $(\hat{v}_t, \hat{\omega}_t)$ が使用されます。
+ここで，実環境での不確実性を再現するため，実際の制御入力にはガウス分布に従うノイズ $\varepsilon$ が混入された値 $(\hat{v}_t, \hat{\omega}_t)$ が使用されます．
 
 $$
 \begin{aligned}
@@ -105,20 +105,14 @@ $$
 $$
 
 ### 2. 観測モデル (Measurement Model)
-地図上のランドマーク $m_j$ の位置を $(m_{j,x}, m_{j,y})$ としたとき、ロボットから見たランドマークの距離 $r$ と方位角 $\phi$ は以下のように計算されます。
+地図上のランドマーク $m_j$ の位置を $(m_{j,x}, m_{j,y})$ としたとき，ロボットから見たランドマークの距離 $r$ と方位角 $\phi$ は以下のように計算されます．
 
 $$
 \mathbf{z}_{pred} = \begin{pmatrix} r \\ \phi \end{pmatrix} = \begin{pmatrix} \sqrt{(m_{j,x} - x_t)^2 + (m_{j,y} - y_t)^2} \\ \text{atan2}(m_{j,y} - y_t, m_{j,x} - x_t) - \theta_t \end{pmatrix}
 $$
 
 ### 3. 尤度計算 (Likelihood Update)
-実際のセンサ観測値 $\mathbf{z}_{obs}$ と、各パーティクルの位置から予測される観測値 $\mathbf{z}_{pred}$ との差（誤差）に基づき、そのパーティクルの尤度（重み $w$）を算出します。誤差分布には多変量ガウス分布を仮定しています。
-
-$$
-w \propto \mathcal{N}(\mathbf{z}_{obs} \mid \mathbf{z}_{pred}, \Sigma)
-$$
-
-ここで $\Sigma$ はセンサのノイズ共分散行列であり、距離に比例して誤差が大きくなる特性をモデル化しています。
+実際のセンサ観測値 $mathbf{z}_{obs}$ と各パーティクルの位置から予測される観測値 $mathbf{z}_{pred}$ との差（誤差）に基づき，そのパーティクルの尤度（重み $w$）を算出します。誤差分布には多変量ガウス分布を仮定しています．
 
 ## 参考
 上田隆一『詳解 確率ロボティクス -Pythonによる基礎アルゴリズムの実装-』講談社, 2019年.
