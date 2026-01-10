@@ -108,7 +108,7 @@ $$
 地図上のランドマーク $m_j$ の位置を $(m_{j,x}, m_{j,y})$ としたとき，ロボットから見たランドマークの距離 $r$ と方位角 $\phi$ は以下のように計算されます．
 
 $$
-w \propto \exp\left( - \frac{(r_{obs} - r_{pred})^2}{2\sigma_r^2})
+w \propto \exp( - \frac{(z_{obs} - z_{pred})^2}{2\sigma_r^2})
 $$
 
 ### 3. 尤度計算 (Likelihood Update)
