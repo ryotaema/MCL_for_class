@@ -6,10 +6,6 @@ import math
 import random
 import copy
 
-# ==========================================
-# 1. 基本関数・クラス
-# ==========================================
-
 def state_transition(nu, omega, time, pose):
     t0 = pose[2]
     if math.fabs(omega) < 1e-10: 
@@ -39,10 +35,6 @@ class Map:
     
     def append_landmark(self, x, y):
         self.landmarks.append(Landmark(x, y, len(self.landmarks)))
-
-# ==========================================
-# 2. MCL クラス群 (★ここを修正済み)
-# ==========================================
 
 class Particle: 
     def __init__(self, init_pose, weight):
@@ -87,21 +79,17 @@ class Mcl:
         self.pose = self.particles[0].pose 
         
     def set_ml(self):
-        # ★ここを修正: 最尤(argmax)ではなく、重み付き平均(mean)を使う
         xs = np.array([p.pose[0] for p in self.particles])
         ys = np.array([p.pose[1] for p in self.particles])
         ts = np.array([p.pose[2] for p in self.particles])
         ws = np.array([p.weight for p in self.particles])
         
-        # 重みの合計で割って正規化（念のため）
         if np.sum(ws) != 0:
             ws = ws / np.sum(ws)
         
-        # 座標の平均
         x_mean = np.sum(xs * ws)
         y_mean = np.sum(ys * ws)
         
-        # 角度の平均（ベクトル合成）
         v_cos = np.sum(np.cos(ts) * ws)
         v_sin = np.sum(np.sin(ts) * ws)
         t_mean = math.atan2(v_sin, v_cos)
@@ -136,10 +124,6 @@ class Mcl:
 
         self.particles = [copy.deepcopy(e) for e in ps]
         for p in self.particles: p.weight = 1.0/len(self.particles)
-
-# ==========================================
-# 3. エージェント & ロボット
-# ==========================================
 
 class EstimationAgent: 
     def __init__(self, time_interval, nu, omega, estimator):
@@ -176,24 +160,20 @@ class RealRobot:
         nu, omega = self.agent.decision(obs)
         self.pose = state_transition(nu, omega, time_interval, self.pose)
 
-# ==========================================
-# 4. メイン実行 & アニメーション
-# ==========================================
-
 def main():
     TIME_INTERVAL = 0.1
     SIM_STEPS = 300
     
     m = Map()
     # for ln in [(-4,2), (2,-3), (3,3), (0, 5), (-2, -4)]: 
-    for ln in [(-4,2),  (3,3)]: 
+    for ln in [(-4,2),  (3,3), (-2,-2)]: 
         m.append_landmark(*ln)
 
     initial_pose = np.array([0.0, 0.0, 0.0])
 
     motion_noise = {"nn":0.5, "no":0.5, "on":0.5, "oo":0.5}
     # motion_noise = {"nn":0.19, "no":0.001, "on":0.13, "oo":0.2}
-    # パーティクル数100
+    # パーティクルの設定
     estimator = Mcl(m, np.array([0.0, 0.0, 0.0]), 100, motion_noise, distance_dev_rate=0.2, direction_dev=0.05)
     
     agent = EstimationAgent(TIME_INTERVAL, 0.4, 20.0/180*math.pi, estimator)
@@ -206,7 +186,6 @@ def main():
     initial_us = [math.cos(p.pose[2]) for p in estimator.particles]
     initial_vs = [math.sin(p.pose[2]) for p in estimator.particles]
 
-    # パーティクルを少し見やすく (scale=5.0)
     p_arrows = ax.quiver(initial_xs, initial_ys, initial_us, initial_vs, 
                          color='blue', alpha=0.5, scale=5.0, 
                          scale_units='xy', angles='xy', label='Particles')
@@ -244,7 +223,6 @@ def main():
         p_arrows.set_offsets(np.c_[px, py])
         p_arrows.set_UVC(pu, pv)
         
-        # 推定軌跡の更新
         hist = agent.poses
         hx = [h[0] for h in hist]
         hy = [h[1] for h in hist]
